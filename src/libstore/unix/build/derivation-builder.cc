@@ -8,6 +8,7 @@
 #include "nix/util/util.hh"
 #include "nix/util/archive.hh"
 #include "nix/util/git.hh"
+#include "nix/util/fs-sink.hh"
 #include "nix/store/daemon.hh"
 #include "nix/util/topo-sort.hh"
 #include "nix/store/build/child.hh"
@@ -1755,12 +1756,12 @@ SingleDrvOutputs DerivationBuilderImpl::registerOutputs()
 
             auto tmpOutput = tempDir / "x";
 
-            /* Serialise and create a fresh copy of the output to break
-               any stale writable file descriptors. Copy through the
-               serialisation/deserialisation. TODO: Use copyRecursive here and
-               make use of reflinking. */
-            auto source = sinkToSource([&](Sink & nextSink) { dumpPath(actualPath, nextSink); });
-            restorePath(tmpOutput, *source, store.config->getLocalSettings().fsyncStorePaths);
+            /* Copy files to break stale file descriptors. copyRecursive below will use
+               reflinking to optimise the copying overhead. */
+            auto pathAccessor = makeFSSourceAccessor(actualPath);
+            RestoreSink restoreSink{store.config->getLocalSettings().fsyncStorePaths};
+            restoreSink.dstPath = tmpOutput;
+            copyRecursive(*pathAccessor, CanonPath::root, restoreSink, CanonPath::root);
             /* This makes it slightly harder to make sense of the control flow. The rule
                of thumb is that actualPath points to the current location of the stuff
                that we'll end up registering. */

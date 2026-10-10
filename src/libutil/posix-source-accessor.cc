@@ -2,6 +2,7 @@
 #include "nix/util/source-path.hh"
 #include "nix/util/signals.hh"
 #include "nix/util/sync.hh"
+#include "nix/util/file-descriptor.hh"
 
 #include <boost/unordered/concurrent_flat_map.hpp>
 
@@ -59,7 +60,10 @@ void PosixSourceAccessor::readFile(const CanonPath & path, Sink & sink, fun<void
 
     sizeCallback(size);
 
-    drainFD(fd.get(), sink, {.expectedSize = size});
+    /* The most important invariant we care about here is writing exactly size
+       bytes to the sink. copyFdRange should throw an EndOfFile if we fail to read
+       `size` bytes. */
+    copyFdRange(fd.get(), /*offset=*/0, static_cast<size_t>(size), sink, /*tryCoW=*/true);
 }
 
 bool PosixSourceAccessor::pathExists(const CanonPath & path)

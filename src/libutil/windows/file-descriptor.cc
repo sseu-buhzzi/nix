@@ -125,4 +125,10 @@ void syncDescriptor(Descriptor fd)
     }
 }
 
+bool tryCopyFdRangeFast(Descriptor from, Descriptor to, off_t offset, size_t nbytes, size_t & written)
+{
+    /* TODO: Implement if this becomes relevant. */
+    return false;
+}
+
 } // namespace nix
