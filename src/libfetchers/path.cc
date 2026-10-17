@@ -4,6 +4,7 @@
 #include "nix/fetchers/cache.hh"
 #include "nix/fetchers/fetch-to-store.hh"
 #include "nix/fetchers/fetch-settings.hh"
+#include "nix/util/posix-source-accessor.hh"
 
 namespace nix::fetchers {
 
@@ -156,9 +157,9 @@ struct PathInputScheme : InputScheme
         if (!storePath || storePath->name() != "source" || !store.isValidPath(*storePath)) {
             Activity act(*logger, lvlTalkative, actUnknown, fmt("copying %s to the store", PathFmt(absPath)));
             // FIXME: try to substitute storePath.
-            auto src = sinkToSource(
-                [&](Sink & sink) { mtime = dumpPathAndGetMtime(absPath.string(), sink, defaultPathFilter); });
-            storePath = store.addToStoreFromDump(*src, "source");
+            const auto srcPath = PosixSourceAccessor::createAtRoot(absPath, /*trackLastModified=*/true);
+            storePath = store.addToStore("source", srcPath);
+            mtime = srcPath.accessor->getLastModified().value();
         }
 
         auto accessor = store.requireStoreObjectAccessor(*storePath);
