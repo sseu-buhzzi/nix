@@ -1007,7 +1007,7 @@ std::map<StorePath, StorePath> copyPaths(
 std::map<StorePath, StorePath> copyPaths(
     Store & srcStore,
     Store & dstStore,
-    const StorePathSet & paths,
+    const StorePathSet & storePaths,
     RepairFlag repair = NoRepair,
     CheckSigsFlag checkSigs = CheckSigs,
     SubstituteFlag substitute = NoSubstitute);

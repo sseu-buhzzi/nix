@@ -982,6 +982,19 @@ void copyStorePath(
         info = info2;
     }
 
+    /* If the source store exposes a local file-system accessor, try a
+       copy-on-write import. Otherwise (or if the destination store does
+       not support CoW), fall back to copying the NAR. */
+    if (auto * const localSrcStore = dynamic_cast<LocalFSStore *>(&srcStore)) {
+        if (const auto accessor = localSrcStore->getFSAccessor(storePath)) {
+            if (dstStore.addToStoreFromSourcePath(
+                    *info, SourcePath{ref{accessor}}, repair, checkSigs, defaultPathFilter)) {
+                act.progress(info->narSize, info->narSize);
+                return;
+            }
+        }
+    }
+
     auto source = sinkToSource(
         [&](Sink & sink) {
             LambdaSink progressSink([&](std::string_view data) {
@@ -1042,15 +1055,15 @@ std::map<StorePath, StorePath> copyPaths(
     Store & srcStore,
     Store & dstStore,
     const StorePathSet & storePaths,
-    RepairFlag repair,
-    CheckSigsFlag checkSigs,
-    SubstituteFlag substitute)
+    const RepairFlag repair,
+    const CheckSigsFlag checkSigs,
+    const SubstituteFlag substitute)
 {
-    auto valid = dstStore.queryValidPaths(storePaths, substitute);
+    const auto valid = dstStore.queryValidPaths(storePaths, substitute);
 
     StorePathSet missing;
     for (auto & path : storePaths)
-        if (!valid.count(path))
+        if (!valid.contains(path))
             missing.insert(path);
 
     Activity act(*logger, lvlInfo, actCopyPaths, fmt("copying %d paths", missing.size()));
@@ -1058,7 +1071,7 @@ std::map<StorePath, StorePath> copyPaths(
     // In the general case, `addMultipleToStore` requires a sorted list of
     // store paths to add, so sort them right now
     auto sortedMissing = srcStore.topoSortPaths(missing);
-    std::reverse(sortedMissing.begin(), sortedMissing.end());
+    std::ranges::reverse(sortedMissing);
 
     std::map<StorePath, StorePath> pathsMap;
     for (auto & path : storePaths)
@@ -1067,7 +1080,7 @@ std::map<StorePath, StorePath> copyPaths(
     Store::PathsSource pathsToCopy;
 
     auto computeStorePathForDst = [&](const ValidPathInfo & currentPathInfo) -> StorePath {
-        auto storePathForSrc = currentPathInfo.path;
+        const auto storePathForSrc = currentPathInfo.path;
         auto storePathForDst = storePathForSrc;
         if (currentPathInfo.ca && currentPathInfo.references.empty()) {
             storePathForDst = dstStore.makeFixedOutputPathFromCA(
@@ -1084,7 +1097,19 @@ std::map<StorePath, StorePath> copyPaths(
         return storePathForDst;
     };
 
-    for (auto & missingPath : sortedMissing) {
+    auto makePathActivity = [&](const StorePath & path) -> Activity {
+        const auto & srcCfg = srcStore.config;
+        const auto & dstCfg = dstStore.config;
+        const auto storePathS = srcStore.printStorePath(path);
+        return Activity(
+            *logger,
+            lvlInfo,
+            actCopyPath,
+            makeCopyPathMessage(srcCfg, dstCfg, storePathS),
+            {storePathS, srcCfg.getHumanReadableURI(), dstCfg.getHumanReadableURI()});
+    };
+
+    for (const auto & missingPath : sortedMissing) {
         auto info = srcStore.queryPathInfo(missingPath);
 
         auto storePathForDst = computeStorePathForDst(*info);
@@ -1092,25 +1117,36 @@ std::map<StorePath, StorePath> copyPaths(
 
         ValidPathInfo infoForDst = *info;
         infoForDst.path = storePathForDst;
+        /* Copied paths are not ultimately trusted. Normally done by
+           `addMultipleToStore`, which the CoW fast path below bypasses. */
+        infoForDst.ultimate = false;
+
+        /* If the source store exposes a local file-system accessor, try a
+           copy-on-write import. Otherwise (or if the destination store does
+           not support CoW), fall back to copying the NAR below. */
+        if (auto * const localSrcStore = dynamic_cast<LocalFSStore *>(&srcStore)) {
+            if (const auto accessor = localSrcStore->getFSAccessor(missingPath)) {
+                const auto pathAct = makePathActivity(missingPath);
+                const PushActivity pact(pathAct.id);
+
+                if (dstStore.addToStoreFromSourcePath(
+                        infoForDst, SourcePath{ref{accessor}}, repair, checkSigs, defaultPathFilter)) {
+                    pathAct.progress(infoForDst.narSize, infoForDst.narSize);
+                    continue;
+                }
+            }
+        }
 
         auto source = sinkToSource([&, narSize = info->narSize](Sink & sink) {
             // We can reasonably assume that the copy will happen whenever we
             // read the path, so log something about that at that point
             uint64_t total = 0;
-            const auto & srcCfg = srcStore.config;
-            const auto & dstCfg = dstStore.config;
-            auto storePathS = srcStore.printStorePath(missingPath);
-            Activity act(
-                *logger,
-                lvlInfo,
-                actCopyPath,
-                makeCopyPathMessage(srcCfg, dstCfg, storePathS),
-                {storePathS, srcCfg.getHumanReadableURI(), dstCfg.getHumanReadableURI()});
-            PushActivity pact(act.id);
+            const auto pathAct = makePathActivity(missingPath);
+            const PushActivity pact(pathAct.id);
 
-            LambdaSink progressSink([&](std::string_view data) {
+            LambdaSink progressSink([&](const std::string_view data) {
                 total += data.size();
-                act.progress(total, narSize);
+                pathAct.progress(total, narSize);
             });
             TeeSink tee{sink, progressSink};
 
