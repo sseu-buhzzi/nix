@@ -7,6 +7,7 @@
 #include "nix/store/derivations.hh"
 #include "nix/store/store-api.hh"
 #include "nix/store/store-open.hh"
+#include "nix/store/local-fs-store.hh"
 #include "nix/util/util.hh"
 #include "nix/store/nar-info-disk-cache.hh"
 #include "nix/util/thread-pool.hh"
@@ -261,12 +262,14 @@ digraph graphname {
 }
 */
 ValidPathInfo Store::addToStoreSlow(
-    std::string_view name,
+    const std::string_view name,
     const SourcePath & srcPath,
-    ContentAddressMethod method,
-    HashAlgorithm hashAlgo,
+    const ContentAddressMethod method,
+    const HashAlgorithm hashAlgo,
     const StorePathSet & references,
-    std::optional<Hash> expectedCAHash)
+    const std::optional<Hash> & expectedCAHash,
+    PathFilter & filter,
+    const RepairFlag repair)
 {
     HashSink narHashSink{HashAlgorithm::SHA256};
     HashSink caHashSink{hashAlgo};
@@ -284,7 +287,7 @@ ValidPathInfo Store::addToStoreSlow(
     /* Functionally, this means that fileSource will yield the content of
        srcPath. The fact that we use scratchpadSink as a temporary buffer here
        is an implementation detail. */
-    auto fileSource = sinkToSource([&](Sink & scratchpadSink) { srcPath.dumpPath(scratchpadSink); });
+    const auto fileSource = sinkToSource([&](Sink & scratchpadSink) { srcPath.dumpPath(scratchpadSink, filter); });
 
     /* tapped provides the same data as fileSource, but we also write all the
        information to narSink. */
@@ -292,8 +295,8 @@ ValidPathInfo Store::addToStoreSlow(
 
     NullFileSystemObjectSink blank;
     auto & parseSink = method.getFileIngestionMethod() == FileIngestionMethod::Flat
-                           ? (FileSystemObjectSink &) fileSink
-                           : (FileSystemObjectSink &) blank; // for recursive or git we do recursive
+                           ? static_cast<FileSystemObjectSink &>(fileSink)
+                           : static_cast<FileSystemObjectSink &>(blank); // for recursive or git we do recursive
 
     /* The information that flows from tapped (besides being replicated in
        narSink), is now put in parseSink. */
@@ -303,9 +306,9 @@ ValidPathInfo Store::addToStoreSlow(
        finish. */
     auto [narHash, narSize] = narHashSink.finish();
 
-    auto hash = method == ContentAddressMethod::Raw::NixArchive && hashAlgo == HashAlgorithm::SHA256 ? narHash
-                : method == ContentAddressMethod::Raw::Git ? git::dumpHash(hashAlgo, srcPath).hash
-                                                           : caHashSink.finish().hash;
+    const auto hash = method == ContentAddressMethod::Raw::NixArchive && hashAlgo == HashAlgorithm::SHA256 ? narHash
+                      : method == ContentAddressMethod::Raw::Git ? git::dumpHash(hashAlgo, srcPath, filter).hash
+                                                                 : caHashSink.finish().hash;
 
     if (expectedCAHash && expectedCAHash != hash)
         throw Error("hash mismatch for '%s'", srcPath);
@@ -323,12 +326,29 @@ ValidPathInfo Store::addToStoreSlow(
         narHash);
     info.narSize = narSize;
 
-    if (!isValidPath(info.path)) {
-        auto source = sinkToSource([&](Sink & scratchpadSink) { srcPath.dumpPath(scratchpadSink); });
-        addToStore(info, *source);
+    if (repair || !isValidPath(info.path)) {
+        /* Try a copy-on-write import first. If the store cannot do that,
+           fall back to the NAR-based `addToStore()`. */
+        if (!addToStoreFromSourcePath(info, srcPath, repair, CheckSigs, filter)) {
+            const auto source = sinkToSource([&](Sink & scratchpadSink) { srcPath.dumpPath(scratchpadSink, filter); });
+            addToStore(info, *source, repair, CheckSigs);
+        }
     }
 
     return info;
+}
+
+/**
+ * Try to add the contents of `path` to the store using copy-on-write.
+ *
+ * This is the default implementation, which does not support CoW: it
+ * returns `false` and leaves the store unchanged, so the caller must
+ * perform a normal NAR-based import.
+ */
+bool Store::addToStoreFromSourcePath(
+    const ValidPathInfo &, const SourcePath &, const RepairFlag, const CheckSigsFlag, PathFilter &)
+{
+    return false;
 }
 
 void Store::narFromPath(const StorePath & path, Sink & sink)

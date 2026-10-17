@@ -113,6 +113,12 @@ std::make_unsigned_t<off_t> getFileSize(Descriptor fd);
 size_t readOffset(Descriptor fd, off_t offset, std::span<std::byte> buffer);
 
 /**
+ * Whether the platform supports `copy_file_range()` (or an equivalent
+ * fast file-copy primitive).
+ */
+bool haveCopyFileRange();
+
+/**
  * Read \ref nbytes starting at \ref offset from a seekable file into a sink.
  *
  * @param tryCoW Used as a hint to use optimised file copying like copy_file_range.

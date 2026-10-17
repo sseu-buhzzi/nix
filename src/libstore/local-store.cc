@@ -66,6 +66,7 @@ std::string LocalStoreConfig::doc()
 {
     return
 #include "local-store.md"
+
         ;
 }
 
@@ -559,6 +560,7 @@ void LocalStore::openDB(State & state, bool create)
     if (create) {
         static const char schema[] =
 #include "schema.sql.gen.hh"
+
             ;
         db.exec(schema);
     }
@@ -595,6 +597,7 @@ void LocalStore::upgradeDBSchema(State & state)
         doUpgrade(
             "20220326-ca-derivations",
 #include "ca-specific-schema.sql.gen.hh"
+
         );
 }
 
@@ -982,15 +985,97 @@ bool LocalStore::realisationIsUntrusted(const Realisation & realisation)
     return config->requireSigs && !realisation.checkSignatures(realisation.id, getPublicKeys());
 }
 
-void LocalStore::addToStore(const ValidPathInfo & info, Source & source, RepairFlag repair, CheckSigsFlag checkSigs)
+void LocalStore::preparePathImport(const ValidPathInfo & info, const CheckSigsFlag checkSigs)
 {
     if (checkSigs && pathInfoIsUntrusted(info))
         throw Error("cannot add path '%s' because it lacks a signature by a trusted key", printStorePath(info.path));
+    addTempRoot(info.path);
+}
+
+std::pair<PathLocks, std::filesystem::path> LocalStore::acquireOutputLock(const StorePath & path)
+{
+    PathLocks outputLock;
+    auto realPath = toRealPath(path);
+    if (!locksHeld.contains(printStorePath(path)))
+        outputLock.lockPaths({realPath});
+    return {std::move(outputLock), std::move(realPath)};
+}
+
+void LocalStore::checkNarHashAndSize(const ValidPathInfo & info, const HashResult & hashResult) const
+{
+    if (hashResult.hash != info.narHash)
+        throw Error(
+            "hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
+            printStorePath(info.path),
+            info.narHash.to_string(HashFormat::Nix32, true),
+            hashResult.hash.to_string(HashFormat::Nix32, true));
+
+    if (hashResult.numBytesDigested != info.narSize)
+        throw Error(
+            "size mismatch importing path '%s';\n  specified: %s\n  got:       %s",
+            printStorePath(info.path),
+            info.narSize,
+            hashResult.numBytesDigested);
+}
+
+void LocalStore::checkCAHash(const ValidPathInfo & info)
+{
+    if (!info.ca)
+        return;
+
+    const auto & [specifiedMetho, specifiedHash] = *info.ca;
+
+    const auto actualHash = [&]() -> Hash {
+        auto accessor = getFSAccessor(false);
+        const CanonPath path{info.path.to_string()};
+        switch (auto fim = specifiedMetho.getFileIngestionMethod()) {
+        case FileIngestionMethod::Flat:
+        case FileIngestionMethod::NixArchive: {
+            HashModuloSink caSink{
+                specifiedHash.algo,
+                std::string{info.path.hashPart()},
+            };
+            dumpPath({accessor, path}, caSink, static_cast<FileSerialisationMethod>(fim));
+            return caSink.finish().hash;
+        }
+        case FileIngestionMethod::Git:
+            return git::dumpHash(specifiedHash.algo, {accessor, path}).hash;
+        }
+        unreachable();
+    }();
+
+    if (specifiedHash != actualHash)
+        throw Error(
+            "ca hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
+            printStorePath(info.path),
+            specifiedHash.to_string(HashFormat::Nix32, true),
+            actualHash.to_string(HashFormat::Nix32, true));
+}
+
+void LocalStore::finalisePathImport(
+    const ValidPathInfo & info, const std::filesystem::path & realPath, const RepairFlag repair)
+{
+    canonicalisePathMetaData(realPath, {NIX_WHEN_SUPPORT_ACLS(config->getLocalSettings().ignoredAcls)});
+
+    optimisePath(realPath, repair);
+
+    if (config->getLocalSettings().fsyncStorePaths) {
+        recursiveSync(realPath);
+        syncParent(realPath);
+    }
+
+    registerValidPath(info);
+}
+
+void LocalStore::addToStore(
+    const ValidPathInfo & info, Source & source, const RepairFlag repair, const CheckSigsFlag checkSigs)
+{
+    preparePathImport(info, checkSigs);
 
     {
         /* In case we are not interested in reading the NAR: discard it. */
         bool narRead = false;
-        Finally cleanup = [&]() {
+        const Finally cleanup = [&] {
             if (!narRead)
                 try {
                     source.skip(info.narSize);
@@ -1000,21 +1085,11 @@ void LocalStore::addToStore(const ValidPathInfo & info, Source & source, RepairF
                 }
         };
 
-        addTempRoot(info.path);
+        if (repair == Repair || !isValidPath(info.path)) {
 
-        if (repair || !isValidPath(info.path)) {
+            auto [outputLock, realPath] = acquireOutputLock(info.path);
 
-            PathLocks outputLock;
-
-            auto realPath = toRealPath(info.path);
-
-            /* Lock the output path.  But don't lock if we're being called
-            from a build hook (whose parent process already acquired a
-            lock on this path). */
-            if (!locksHeld.count(printStorePath(info.path)))
-                outputLock.lockPaths({realPath});
-
-            if (repair || !isValidPath(info.path)) {
+            if (repair == Repair || !isValidPath(info.path)) {
 
                 deletePath(realPath);
 
@@ -1027,70 +1102,14 @@ void LocalStore::addToStore(const ValidPathInfo & info, Source & source, RepairF
                 narRead = true;
                 restorePath(realPath, wrapperSource, config->getLocalSettings().fsyncStorePaths);
 
-                auto hashResult = hashSink.finish();
+                const auto hashResult = hashSink.finish();
 
-                if (hashResult.hash != info.narHash)
-                    throw Error(
-                        "hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
-                        printStorePath(info.path),
-                        info.narHash.to_string(HashFormat::Nix32, true),
-                        hashResult.hash.to_string(HashFormat::Nix32, true));
-
-                if (hashResult.numBytesDigested != info.narSize)
-                    throw Error(
-                        "size mismatch importing path '%s';\n  specified: %s\n  got:       %s",
-                        printStorePath(info.path),
-                        info.narSize,
-                        hashResult.numBytesDigested);
-
-                if (info.ca) {
-                    auto & specified = *info.ca;
-                    auto actualHash = ({
-                        auto accessor = getFSAccessor(false);
-                        CanonPath path{info.path.to_string()};
-                        Hash h{HashAlgorithm::SHA256}; // throwaway def to appease C++
-                        auto fim = specified.method.getFileIngestionMethod();
-                        switch (fim) {
-                        case FileIngestionMethod::Flat:
-                        case FileIngestionMethod::NixArchive: {
-                            HashModuloSink caSink{
-                                specified.hash.algo,
-                                std::string{info.path.hashPart()},
-                            };
-                            dumpPath({accessor, path}, caSink, (FileSerialisationMethod) fim);
-                            h = caSink.finish().hash;
-                            break;
-                        }
-                        case FileIngestionMethod::Git:
-                            h = git::dumpHash(specified.hash.algo, {accessor, path}).hash;
-                            break;
-                        }
-                        ContentAddress{
-                            .method = specified.method,
-                            .hash = std::move(h),
-                        };
-                    });
-                    if (specified.hash != actualHash.hash) {
-                        throw Error(
-                            "ca hash mismatch importing path '%s';\n  specified: %s\n  got:       %s",
-                            printStorePath(info.path),
-                            specified.hash.to_string(HashFormat::Nix32, true),
-                            actualHash.hash.to_string(HashFormat::Nix32, true));
-                    }
-                }
+                checkNarHashAndSize(info, hashResult);
+                checkCAHash(info);
 
                 autoGC();
 
-                canonicalisePathMetaData(realPath, {NIX_WHEN_SUPPORT_ACLS(config->getLocalSettings().ignoredAcls)});
-
-                optimisePath(realPath, repair); // FIXME: combine with hashPath()
-
-                if (config->getLocalSettings().fsyncStorePaths) {
-                    recursiveSync(realPath);
-                    syncParent(realPath);
-                }
-
-                registerValidPath(info);
+                finalisePathImport(info, realPath, repair);
             }
 
             outputLock.setDeletion(true);
@@ -1099,6 +1118,59 @@ void LocalStore::addToStore(const ValidPathInfo & info, Source & source, RepairF
 
     // In case `cleanup` ignored an `Interrupted` exception
     checkInterrupt();
+}
+
+bool LocalStore::addToStoreFromSourcePath(
+    const ValidPathInfo & info,
+    const SourcePath & srcPath,
+    const RepairFlag repair,
+    const CheckSigsFlag checkSigs,
+    PathFilter & filter)
+{
+    /* Check up front, before making any changes, whether a CoW copy is
+       possible at all. If not, the caller will fall back to NAR. */
+    if (!canCopyPathCoW(srcPath, std::filesystem::path{config->realStoreDir.get()}))
+        return false;
+
+    preparePathImport(info, checkSigs);
+    if (repair == Repair || !isValidPath(info.path)) {
+
+        auto [outputLock, realPath] = acquireOutputLock(info.path);
+
+        if (repair == Repair || !isValidPath(info.path)) {
+
+            deletePath(realPath);
+            autoGC();
+
+            const auto [tempDir, tempDirFd] = createTempDirInStore();
+            const AutoDelete delTempDir{tempDir};
+            const auto tempPath = tempDir / "x";
+
+            /* Copy the contents, using copy-on-write (reflink) when possible. */
+            tryCopyPathCoW(srcPath, tempPath, config->getLocalSettings().fsyncStorePaths, filter);
+
+            /* The copy bypassed the NAR stream, so hash what we actually wrote
+               and make sure it matches the expected `ValidPathInfo`. */
+            const auto hashResult = hashPath(
+                SourcePath{makeFSSourceAccessor(tempPath)}, FileSerialisationMethod::NixArchive, HashAlgorithm::SHA256);
+
+            checkNarHashAndSize(info, hashResult);
+
+            moveFile(tempPath, realPath);
+
+            /* `checkCAHash()` reads the content from the store, so it has to run
+               after the copy has been moved into place. */
+            checkCAHash(info);
+
+            finalisePathImport(info, realPath, repair);
+        }
+
+        outputLock.setDeletion(true);
+    }
+
+    checkInterrupt();
+
+    return true;
 }
 
 StorePath LocalStore::addToStoreFromDump(

@@ -125,6 +125,11 @@ void syncDescriptor(Descriptor fd)
     }
 }
 
+bool haveCopyFileRange()
+{
+    return false;
+}
+
 bool tryCopyFdRangeFast(Descriptor from, Descriptor to, off_t offset, size_t nbytes, size_t & written)
 {
     /* TODO: Implement if this becomes relevant. */

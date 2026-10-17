@@ -588,11 +588,13 @@ public:
      */
     ValidPathInfo addToStoreSlow(
         std::string_view name,
-        const SourcePath & path,
+        const SourcePath & srcPath,
         ContentAddressMethod method = ContentAddressMethod::Raw::NixArchive,
         HashAlgorithm hashAlgo = HashAlgorithm::SHA256,
         const StorePathSet & references = StorePathSet(),
-        std::optional<Hash> expectedCAHash = {});
+        const std::optional<Hash> & expectedCAHash = std::nullopt,
+        PathFilter & filter = defaultPathFilter,
+        RepairFlag repair = NoRepair);
 
     /**
      * Like addToStore(), but the contents of the path are contained
@@ -619,6 +621,29 @@ public:
         HashAlgorithm hashAlgo = HashAlgorithm::SHA256,
         const StorePathSet & references = StorePathSet(),
         RepairFlag repair = NoRepair) = 0;
+
+    /**
+     * Try to add the contents of `path` to the store using copy-on-write
+     * (reflink), given a `ValidPathInfo` that already describes the
+     * resulting store object (in particular its `narHash` and `narSize`).
+     *
+     * Returns `false` if this store cannot perform a CoW import (for
+     * example, because it is not a local store, the source has no
+     * physical path, the source and the store are on different file
+     * systems, or the platform does not support `copy_file_range()`).
+     * In that case the store is left unchanged and the caller must
+     * perform a normal NAR-based import.
+     *
+     * Returns `true` on success; the contents have then been added and
+     * registered. This does not guarantee that the file system actually
+     * performed a reflink for every file.
+     */
+    virtual bool addToStoreFromSourcePath(
+        const ValidPathInfo & info,
+        const SourcePath & path,
+        RepairFlag repair,
+        CheckSigsFlag checkSigs,
+        PathFilter & filter);
 
     /**
      * Add a mapping indicating that `deriver!outputName` maps to the output path

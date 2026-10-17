@@ -148,6 +148,15 @@ void syncDescriptor(Descriptor fd)
         throw NativeSysError("fsync file descriptor %1%", fd);
 }
 
+bool haveCopyFileRange()
+{
+#if HAVE_COPY_FILE_RANGE
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool tryCopyFdRangeFast(Descriptor from, Descriptor to, off_t offset, size_t nbytes, size_t & written)
 {
 #if HAVE_COPY_FILE_RANGE

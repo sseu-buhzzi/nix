@@ -281,6 +281,13 @@ public:
 
     void addToStore(const ValidPathInfo & info, Source & source, RepairFlag repair, CheckSigsFlag checkSigs) override;
 
+    bool addToStoreFromSourcePath(
+        const ValidPathInfo & info,
+        const SourcePath & srcPath,
+        RepairFlag repair,
+        CheckSigsFlag checkSigs,
+        PathFilter & filter) override;
+
     StorePath addToStoreFromDump(
         Source & dump,
         std::string_view name,
@@ -293,6 +300,40 @@ public:
     void addTempRoot(const StorePath & path) override;
 
 private:
+
+    /**
+     * Shared prologue of the path importers: reject an untrusted signature
+     * (when `checkSigs` is set) and add a temporary GC root for the path.
+     */
+    void preparePathImport(const ValidPathInfo & info, CheckSigsFlag checkSigs);
+
+    /**
+     * Acquire the lock on the output store path `path`, unless we already
+     * hold one (e.g. when called from a build hook, whose parent process
+     * already acquired the lock). Returns the lock together with the
+     * corresponding real store path. The lock is released on destruction
+     * unless `setDeletion(true)` is called on it.
+     */
+    std::pair<PathLocks, std::filesystem::path> acquireOutputLock(const StorePath & path);
+
+    /**
+     * Check that the hash and size of the NAR of an imported path match
+     * the `ValidPathInfo` provided by the caller.
+     */
+    void checkNarHashAndSize(const ValidPathInfo & info, const HashResult & hashResult) const;
+
+    /**
+     * Check that the content of the store object at `info.path` matches
+     * its content address `info.ca`, if any. The content must already be
+     * in place in the store (but need not be registered yet).
+     */
+    void checkCAHash(const ValidPathInfo & info);
+
+    /**
+     * Common tail of the path importers: canonicalise metadata, dedupe,
+     * fsync if configured, and register the path as valid.
+     */
+    void finalisePathImport(const ValidPathInfo & info, const std::filesystem::path & realPath, RepairFlag repair);
 
     void createTempRootsFile();
 

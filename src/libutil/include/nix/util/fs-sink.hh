@@ -3,6 +3,7 @@
 
 #include "nix/util/serialise.hh"
 #include "nix/util/source-accessor.hh"
+#include "nix/util/source-path.hh"
 #include "nix/util/file-system.hh"
 
 namespace nix {
@@ -79,7 +80,36 @@ struct ExtendedFileSystemObjectSink : virtual FileSystemObjectSink
  * Recursively copy file system objects from the source into the sink.
  */
 void copyRecursive(
-    SourceAccessor & accessor, const CanonPath & sourcePath, FileSystemObjectSink & sink, const CanonPath & destPath);
+    SourceAccessor & accessor,
+    const CanonPath & from,
+    FileSystemObjectSink & sink,
+    const CanonPath & to,
+    PathFilter & filter = defaultPathFilter);
+
+/**
+ * Whether a best-effort CoW copy of `src` into `dstDir` is possible.
+ *
+ * This checks that `src` has a physical path (so its files can be
+ * copied with `copy_file_range()`), that the platform supports
+ * `copy_file_range()`, and that `src` and `dstDir` are on the same file
+ * system.
+ */
+bool canCopyPathCoW(const SourcePath & src, const std::filesystem::path & dstDir);
+
+/**
+ * Copy the file system objects at `src` into `dstPath` (which must not
+ * exist yet), using a `RestoreSink`.
+ *
+ * When `src` is a `PosixSourceAccessor` and the destination is on the
+ * same filesystem, regular files are copied using copy-on-write
+ * (`copy_file_range` / reflink); otherwise this degrades to a normal
+ * copy. `EXDEV` (cross-filesystem) is handled by the kernel fallback.
+ */
+void tryCopyPathCoW(
+    const SourcePath & src,
+    const std::filesystem::path & dstPath,
+    bool startFsync = false,
+    PathFilter & filter = defaultPathFilter);
 
 /**
  * Ignore everything and do nothing

@@ -1,4 +1,7 @@
 #include <fcntl.h>
+#ifndef _WIN32
+#  include <sys/stat.h>
+#endif
 
 #include "nix/util/error.hh"
 #include "nix/util/config-global.hh"
@@ -14,11 +17,14 @@
 
 namespace nix {
 
-void copyRecursive(SourceAccessor & accessor, const CanonPath & from, FileSystemObjectSink & sink, const CanonPath & to)
+void copyRecursive(
+    SourceAccessor & accessor,
+    const CanonPath & from,
+    FileSystemObjectSink & sink,
+    const CanonPath & to,
+    PathFilter & filter)
 {
-    auto stat = accessor.lstat(from);
-
-    switch (stat.type) {
+    switch (auto stat = accessor.lstat(from); stat.type) {
     case SourceAccessor::tSymlink: {
         sink.createSymlink(to, accessor.readLink(from));
         break;
@@ -28,15 +34,16 @@ void copyRecursive(SourceAccessor & accessor, const CanonPath & from, FileSystem
         sink.createRegularFile(to, [&](CreateRegularFileSink & crf) {
             if (stat.isExecutable)
                 crf.isExecutable();
-            accessor.readFile(from, crf, [&](uint64_t size) { crf.preallocateContents(size); });
+            accessor.readFile(from, crf, [&](const uint64_t size) { crf.preallocateContents(size); });
         });
         break;
     }
 
     case SourceAccessor::tDirectory: {
         sink.createDirectory(to, [&](FileSystemObjectSink & dirSink, const CanonPath & relDirPath) {
-            for (auto & [name, _] : accessor.readDirectory(from)) {
-                copyRecursive(accessor, from / name, dirSink, relDirPath / name);
+            for (const auto & [name, _] : accessor.readDirectory(from)) {
+                if (filter((from / name).abs()))
+                    copyRecursive(accessor, from / name, dirSink, relDirPath / name, filter);
             }
         });
         break;
@@ -50,6 +57,36 @@ void copyRecursive(SourceAccessor & accessor, const CanonPath & from, FileSystem
     default:
         throw Error("file '%1%' has an unsupported type of %2%", from, stat.typeString());
     }
+}
+
+bool canCopyPathCoW(const SourcePath & src, const std::filesystem::path & dstDir)
+{
+    if (!haveCopyFileRange())
+        return false;
+
+#ifndef _WIN32
+    const auto srcPath = src.getPhysicalPath();
+    if (!srcPath)
+        return false;
+
+    struct stat stSrc{}, stDst{};
+    if (::stat(srcPath->c_str(), &stSrc) != 0)
+        return false;
+    if (::stat(dstDir.c_str(), &stDst) != 0)
+        return false;
+
+    return stSrc.st_dev == stDst.st_dev;
+#else
+    return false;
+#endif
+}
+
+void tryCopyPathCoW(
+    const SourcePath & src, const std::filesystem::path & dstPath, const bool startFsync, PathFilter & filter)
+{
+    RestoreSink sink{startFsync};
+    sink.dstPath = dstPath;
+    copyRecursive(*src.accessor, src.path, sink, CanonPath::root, filter);
 }
 
 struct RestoreSinkSettings : Config
