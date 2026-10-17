@@ -1120,6 +1120,26 @@ void LocalStore::addToStore(
     checkInterrupt();
 }
 
+StorePath LocalStore::addToStore(
+    const std::string_view name,
+    const SourcePath & path,
+    const ContentAddressMethod method,
+    const HashAlgorithm hashAlgo,
+    const StorePathSet & references,
+    PathFilter & filter,
+    const RepairFlag repair)
+{
+    if (!canCopyPathCoW(path, std::filesystem::path{config->realStoreDir.get()}))
+        return Store::addToStore(name, path, method, hashAlgo, references, filter, repair);
+
+    const auto info = addToStoreSlow(name, path, method, hashAlgo, references, std::nullopt, filter, repair);
+
+    if (settings.warnLargePathThreshold && info.narSize >= settings.warnLargePathThreshold)
+        warn("copied large path '%s' to the store (%s)", path, renderSize(static_cast<int64_t>(info.narSize)));
+
+    return info.path;
+}
+
 bool LocalStore::addToStoreFromSourcePath(
     const ValidPathInfo & info,
     const SourcePath & srcPath,

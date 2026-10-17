@@ -117,13 +117,13 @@ StorePath Store::followLinksToStorePath(std::string_view path) const
 }
 
 StorePath Store::addToStore(
-    std::string_view name,
+    const std::string_view name,
     const SourcePath & path,
-    ContentAddressMethod method,
-    HashAlgorithm hashAlgo,
+    const ContentAddressMethod method,
+    const HashAlgorithm hashAlgo,
     const StorePathSet & references,
     PathFilter & filter,
-    RepairFlag repair)
+    const RepairFlag repair)
 {
     FileSerialisationMethod fsm;
     switch (method.getFileIngestionMethod()) {
@@ -139,11 +139,14 @@ StorePath Store::addToStore(
         break;
     }
     std::optional<StorePath> storePath;
-    auto sink = sourceToSink([&](Source & source) {
+    /* `LocalStore` overrides this to try a copy-on-write import first;
+       this base implementation always serialises to NAR. */
+    const auto sink = sourceToSink([&](Source & source) {
         LengthSource lengthSource(source);
         storePath = addToStoreFromDump(lengthSource, name, fsm, method, hashAlgo, references, repair);
         if (settings.warnLargePathThreshold && lengthSource.total >= settings.warnLargePathThreshold)
-            warn("copied large path '%s' to the store (%s)", path, renderSize(lengthSource.total));
+            warn(
+                "copied large path '%s' to the store (%s)", path, renderSize(static_cast<int64_t>(lengthSource.total)));
     });
     dumpPath(path, *sink, fsm, filter);
     sink->finish();

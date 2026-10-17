@@ -281,6 +281,15 @@ public:
 
     void addToStore(const ValidPathInfo & info, Source & source, RepairFlag repair, CheckSigsFlag checkSigs) override;
 
+    StorePath addToStore(
+        std::string_view name,
+        const SourcePath & path,
+        ContentAddressMethod method,
+        HashAlgorithm hashAlgo,
+        const StorePathSet & references,
+        PathFilter & filter,
+        RepairFlag repair) override;
+
     bool addToStoreFromSourcePath(
         const ValidPathInfo & info,
         const SourcePath & srcPath,
