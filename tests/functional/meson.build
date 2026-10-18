@@ -124,6 +124,7 @@ suites = [
       'logging.sh',
       'export.sh',
       'config.sh',
+      'cow.sh',
       'add.sh',
       'chroot-store.sh',
       'filter-source.sh',

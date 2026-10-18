@@ -198,6 +198,8 @@ in
 
   fsync = runNixOSTest ./fsync.nix;
 
+  cow = runNixOSTest ./cow.nix;
+
   cgroups = runNixOSTest ./cgroups;
 
   fetchurl = runNixOSTest ./fetchurl.nix;
