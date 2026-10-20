@@ -1,6 +1,11 @@
+#include <cstring>
 #include <fcntl.h>
 #ifndef _WIN32
 #  include <sys/stat.h>
+#endif
+#ifdef __linux__
+#  include <sys/ioctl.h>
+#  include <linux/btrfs.h>
 #endif
 
 #include "nix/util/error.hh"
@@ -59,6 +64,23 @@ void copyRecursive(
     }
 }
 
+#ifdef __linux__
+/* Temporary workaround: btrfs subvolumes have different st_dev values
+   even though they belong to the same filesystem. */
+static bool isInSameBtrfsFs(const std::filesystem::path & pA, const std::filesystem::path & pB)
+{
+    const AutoCloseFD fdA{open(pA.c_str(), O_RDONLY | O_CLOEXEC)};
+    const AutoCloseFD fdB{open(pB.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (!fdA || !fdB)
+        return false;
+
+    btrfs_ioctl_fs_info_args iA{}, iB{};
+    if (ioctl(fdA.get(), BTRFS_IOC_FS_INFO, &iA) < 0 || ioctl(fdB.get(), BTRFS_IOC_FS_INFO, &iB) < 0)
+        return false;
+    return std::memcmp(iA.fsid, iB.fsid, BTRFS_FSID_SIZE) == 0;
+}
+#endif
+
 bool canCopyPathCoW(const SourcePath & src, const std::filesystem::path & dstDir)
 {
     if (!haveCopyFileRange())
@@ -68,6 +90,11 @@ bool canCopyPathCoW(const SourcePath & src, const std::filesystem::path & dstDir
     const auto srcPath = src.getPhysicalPath();
     if (!srcPath)
         return false;
+
+#  ifdef __linux__
+    if (isInSameBtrfsFs(*srcPath, dstDir))
+        return true;
+#  endif
 
     struct stat stSrc{}, stDst{};
     if (::stat(srcPath->c_str(), &stSrc) != 0)
